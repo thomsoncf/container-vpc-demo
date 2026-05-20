@@ -1,0 +1,17 @@
+{
+  "name": "container-vpc-demo",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^4.93.0",
+    "typescript": "^5.5.0",
+    "@cloudflare/workers-types": "^4.20250515.0"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "^0.3.0"
+  }
+}

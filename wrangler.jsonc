@@ -1,0 +1,36 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "container-vpc-demo",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "containers": [
+    {
+      "class_name": "MyContainer",
+      "image": "./Dockerfile",
+      "max_instances": 1,
+      "name": "container-vpc-demo"
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "MyContainer", "name": "MY_CONTAINER" }
+    ]
+  },
+
+  "migrations": [
+    { "new_sqlite_classes": ["MyContainer"], "tag": "v1" }
+  ],
+
+  "vpc_services": [
+    {
+      "binding": "PRIVATE_API",
+      "service_id": "019dbc57-f657-7023-9b23-71c2646ecffa",
+      "remote": true
+    }
+  ],
+
+  "observability": { "enabled": true }
+}

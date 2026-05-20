@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["@cloudflare/workers-types"],
+    "lib": ["esnext"],
+    "jsx": "react-jsx"
+  },
+  "include": ["src/**/*.ts"]
+}
