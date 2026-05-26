@@ -33,7 +33,24 @@ from typing import Optional
 DEFAULT_HOST = "vpc-demo.demoflair.com"
 DEFAULT_DELAYS = [100, 200, 260, 265, 269, 271, 275, 280]
 DEFAULT_PATHS = ["direct", "container"]
-SOCKET_TIMEOUT = 360  # 6 min — well past any expected backend timeout
+SOCKET_TIMEOUT = 420  # 7 min — well past any expected backend timeout
+
+# Probe path -> Worker URL path
+PROBE_PATHS = {
+    # Worker -> SLOW_VPC (VPC binding to remote VM tunnel -> 127.0.0.1:9000)
+    "direct": "/direct-vpc-slow",
+    # Worker -> MAC_VPC (VPC binding to local Mac tunnel -> 127.0.0.1:9000)
+    "direct-mac": "/direct-mac-vpc-slow",
+    # Worker -> Container -> SLOW_VPC binding -> tunnel
+    "container": "/vpc-slow",
+    # Worker -> Container -> https://slow.demoflair.com (direct HTTPS,
+    # hits the Cloudflare edge for demoflair.com, governed by the
+    # proxy_read_timeout cache rule)
+    "public": "/slow",
+    # Worker -> Container -> internal sleep (no upstream call).
+    # Isolates the Worker -> Container fetch chain timeout.
+    "sleep": "/sleep",
+}
 
 
 @dataclass
@@ -76,15 +93,24 @@ class Result:
 
 def run(probe: Probe, host: str, t_start: float) -> Result:
     nonce = int(time.time() * 1000)
-    if probe.path == "direct":
-        path = "/direct-vpc-slow"
-    elif probe.path == "container":
-        path = "/vpc-slow"
-    else:
-        raise ValueError(f"unknown path: {probe.path}")
+    try:
+        path = PROBE_PATHS[probe.path]
+    except KeyError:
+        raise ValueError(f"unknown path: {probe.path!r}; known: {list(PROBE_PATHS)}")
 
     url = f"https://{host}{path}?delay={probe.delay}&nonce={nonce}"
-    req = urllib.request.Request(url)
+    req = urllib.request.Request(
+        url,
+        headers={
+            # Default Python-urllib UA gets blocked by Cloudflare bot
+            # management on some zones; use a realistic UA.
+            "user-agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/126.0 Safari/537.36 probe-vpc-timeout.py"
+            ),
+        },
+    )
     started = time.time()
     try:
         with urllib.request.urlopen(req, timeout=SOCKET_TIMEOUT) as resp:
@@ -108,10 +134,17 @@ def run(probe: Probe, host: str, t_start: float) -> Result:
     upstream_error: Optional[str] = None
     try:
         j = json.loads(body)
-        if probe.path == "direct":
+        if probe.path in ("direct", "direct-mac"):
+            # Worker route returns flat JSON
             upstream_status = j.get("upstream_status")
             upstream_error = j.get("error")
+        elif probe.path == "sleep":
+            # Container responds directly with the sleep result
+            upstream_status = status
+            if j.get("requested_delay_s") is None:
+                upstream_error = "missing requested_delay_s field"
         else:
+            # Container wrapper returns nested JSON
             upstream_status = j.get("upstream_status")
             ub = j.get("upstream_body") or {}
             if isinstance(ub, dict) and ub.get("vpc_error"):

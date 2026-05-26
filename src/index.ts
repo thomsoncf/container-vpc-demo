@@ -10,7 +10,8 @@ export { ContainerProxy };
 type Env = {
   MY_CONTAINER: DurableObjectNamespace;
   PRIVATE_API: Fetcher; // Workers VPC Service binding → acme-products
-  SLOW_VPC: Fetcher; // Workers VPC Service binding → slow-via-vpc (127.0.0.1:9000)
+  SLOW_VPC: Fetcher; // Workers VPC Service binding → slow-via-vpc (VM 127.0.0.1:9000)
+  MAC_VPC: Fetcher; // Workers VPC Service binding → slow-via-mac (this Mac 127.0.0.1:9000)
 };
 
 export class MyContainer extends Container<Env> {
@@ -87,20 +88,29 @@ export default {
     }
 
     // Direct VPC binding test (no container in the chain).
-    // Isolates the Worker -> SLOW_VPC -> tunnel -> origin path.
-    if (url.pathname.startsWith("/direct-vpc-slow")) {
+    // Isolates the Worker -> VPC binding -> tunnel -> origin path.
+    //   /direct-vpc-slow      -> SLOW_VPC -> VM tunnel
+    //   /direct-mac-vpc-slow  -> MAC_VPC  -> local Mac tunnel
+    const directMatch = url.pathname.match(/^\/direct-(slow|mac)-vpc(?:-slow)?$/);
+    if (
+      url.pathname.startsWith("/direct-vpc-slow") ||
+      url.pathname.startsWith("/direct-mac-vpc-slow")
+    ) {
+      const isLocal = url.pathname.startsWith("/direct-mac-vpc-slow");
+      const binding: Fetcher = isLocal ? env.MAC_VPC : env.SLOW_VPC;
+      const routeName = isLocal ? "direct-mac-vpc-binding" : "direct-vpc-binding";
       const delay = url.searchParams.get("delay") ?? "5";
       const nonce = url.searchParams.get("nonce") ?? Date.now().toString();
       const t0 = Date.now();
       try {
-        const resp = await env.SLOW_VPC.fetch(
+        const resp = await binding.fetch(
           `http://slow-service-via-vpc/slow?delay=${delay}&nonce=${nonce}`,
         );
         const body = await resp.text();
         const dt = Date.now() - t0;
         return new Response(
           JSON.stringify({
-            route: "direct-vpc-binding",
+            route: routeName,
             elapsed_ms: dt,
             upstream_status: resp.status,
             upstream_x_served_by: resp.headers.get("x-served-by"),
@@ -113,7 +123,7 @@ export default {
         const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
         return new Response(
           JSON.stringify({
-            route: "direct-vpc-binding",
+            route: routeName,
             error: msg,
             elapsed_ms: dt,
           }, null, 2),

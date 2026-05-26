@@ -34,12 +34,19 @@
       "binding": "SLOW_VPC",
       "service_id": "019e6576-429d-7802-84fa-0bb4269d6c5b",
       "remote": true
+    },
+    {
+      // -> slow-via-mac VPC service -> cloudflared on this Mac -> 127.0.0.1:9000
+      "binding": "MAC_VPC",
+      "service_id": "019e65a4-38a3-73f3-930c-c6329ea3d328",
+      "remote": true
     }
   ],
 
-  "routes": [
-    { "pattern": "vpc-demo.demoflair.com", "custom_domain": true }
-  ],
+  // "routes" intentionally omitted: the custom domain vpc-demo.demoflair.com
+  // is already wired up. Listing it here forces wrangler to reconcile zone
+  // routes (Workers Routes:Read needed) which the current token lacks.
+  "workers_dev": true,
 
   "observability": { "enabled": true }
 }

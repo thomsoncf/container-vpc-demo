@@ -18,6 +18,10 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import socket
+import ssl
+import traceback
+
 PRIVATE_API = "http://acme-products.internal"
 SLOW_SERVICE = "https://slow.demoflair.com"
 SLOW_VPC = "http://slow-vpc.internal"
@@ -26,8 +30,81 @@ SLOW_VPC = "http://slow-vpc.internal"
 UPSTREAM_TIMEOUT_S = 600
 
 
+def diag_https(host: str, port: int = 443) -> dict:
+    """Connect-only diagnostic: DNS + TCP + TLS handshake. No HTTP body."""
+    out: dict = {"host": host, "port": port}
+    t0 = time.time()
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        out["dns_resolved"] = list({i[4][0] for i in infos})
+        out["dns_ms"] = round((time.time() - t0) * 1000, 1)
+    except Exception as e:
+        out["dns_error"] = f"{type(e).__name__}: {e}"
+        return out
+
+    t1 = time.time()
+    try:
+        with socket.create_connection((host, port), timeout=15) as sock:
+            out["tcp_connect_ms"] = round((time.time() - t1) * 1000, 1)
+            t2 = time.time()
+            ctx = ssl.create_default_context()
+            with ctx.wrap_socket(sock, server_hostname=host) as tls:
+                out["tls_handshake_ms"] = round((time.time() - t2) * 1000, 1)
+                out["tls_version"] = tls.version()
+                out["tls_peer_cert_subject"] = (
+                    tls.getpeercert().get("subject") if tls.getpeercert() else None
+                )
+    except Exception as e:
+        out["connect_error"] = f"{type(e).__name__}: {e}"
+    return out
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        # /sleep?delay=N -> the container itself sleeps then 200s.
+        # No upstream call — isolates the Worker -> Container fetch chain.
+        if self.path.startswith("/sleep"):
+            from urllib.parse import urlparse, parse_qs
+
+            q = parse_qs(urlparse(self.path).query)
+            try:
+                delay = int(q.get("delay", ["5"])[0])
+            except ValueError:
+                delay = 5
+            t0 = time.time()
+            print(f"[container] /sleep delay={delay}s starting", flush=True)
+            time.sleep(delay)
+            elapsed = time.time() - t0
+            print(f"[container] /sleep returned after {round(elapsed,2)}s", flush=True)
+            body = json.dumps({
+                "service": "container-sleep",
+                "requested_delay_s": delay,
+                "actual_elapsed_s": round(elapsed, 2),
+                "msg": "container handled this directly, no upstream call",
+            }).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.send_header("x-served-by", "container-vpc-demo:container")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        # /diag/https?host=X[&port=Y] -> connectivity diagnostic
+        if self.path.startswith("/diag/https"):
+            from urllib.parse import urlparse, parse_qs
+
+            q = parse_qs(urlparse(self.path).query)
+            host = q.get("host", ["slow.demoflair.com"])[0]
+            port = int(q.get("port", ["443"])[0])
+            out = json.dumps(diag_https(host, port), indent=2).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+            return
+
         # /vpc-slow*  -> exercise VPC binding chain (no edge proxy)
         # /slow*      -> exercise direct HTTPS through the edge proxy
         # else        -> existing products-api demo through VPC binding
@@ -61,7 +138,9 @@ class Handler(BaseHTTPRequestHandler):
                 "upstream_url": upstream_url,
                 "route": route,
                 "elapsed_s_before_error": round(elapsed, 2),
+                "traceback": traceback.format_exc().splitlines(),
             }
+            print(f"[container] EXCEPTION {route}: {err['error_type']}: {err['error']} after {round(elapsed,2)}s", flush=True)
             out = json.dumps(err, indent=2).encode()
             self.send_response(502)
             self.send_header("content-type", "application/json")
