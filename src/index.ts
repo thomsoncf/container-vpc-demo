@@ -10,6 +10,7 @@ export { ContainerProxy };
 type Env = {
   MY_CONTAINER: DurableObjectNamespace;
   PRIVATE_API: Fetcher; // Workers VPC Service binding → acme-products
+  SLOW_VPC: Fetcher; // Workers VPC Service binding → slow-via-vpc (127.0.0.1:9000)
 };
 
 export class MyContainer extends Container<Env> {
@@ -17,25 +18,59 @@ export class MyContainer extends Container<Env> {
   defaultPort = 8080;
   sleepAfter = "2m";
 
-  // Deny-by-default egress. The container can only reach the virtual
-  // hostname we explicitly allow below.
+  // Container can reach:
+  //   acme-products.internal -> VPC binding to products-api (existing demo)
+  //   slow-vpc.internal      -> VPC binding to slow-service (TIMEOUT PROBE)
+  //   slow.demoflair.com     -> direct HTTPS through Cloudflare edge
+  //                             (the proxy_read_timeout cache rule path)
   enableInternet = false;
-  allowedHosts = ["acme-products.internal"];
+  allowedHosts = [
+    "acme-products.internal",
+    "slow-vpc.internal",
+    "slow.demoflair.com",
+  ];
 }
 
-// Intercept HTTP calls from inside the container to acme-products.internal
-// and forward them through the Workers VPC binding into the cloudflared tunnel.
-// This handler runs in the Workers runtime, NOT inside the container sandbox,
-// so env.PRIVATE_API is fully available.
+// Intercept HTTP calls from inside the container and forward them through
+// the matching Workers VPC binding into the cloudflared tunnel. These
+// handlers run in the Workers runtime, NOT inside the container sandbox,
+// so env bindings are fully available.
 MyContainer.outboundByHost = {
   "acme-products.internal": async (request, env, ctx) => {
     console.log(
-      `[${ctx.containerId}] container -> VPC: ${request.method} ${request.url}`,
+      `[${ctx.containerId}] container -> VPC(acme-products): ${request.method} ${request.url}`,
     );
-    // The VPC Service config (host=127.0.0.1, port=8080, tunnel=thomson-vm)
-    // determines the upstream target. Only path + query + headers are
-    // forwarded from the inbound request.
     return env.PRIVATE_API.fetch(request);
+  },
+
+  // Probe path: container calls http://slow-vpc.internal/slow?delay=N
+  // -> Worker forwards via the SLOW_VPC binding -> tunnel -> 127.0.0.1:9000.
+  // NO Cloudflare edge proxy in this path, so this is a pure measurement
+  // of the VPC binding / tunnel layer's own timeout.
+  "slow-vpc.internal": async (request, env, ctx) => {
+    const t0 = Date.now();
+    console.log(
+      `[${ctx.containerId}] container -> VPC(slow): ${request.method} ${request.url}`,
+    );
+    try {
+      const resp = await env.SLOW_VPC.fetch(request);
+      console.log(
+        `[${ctx.containerId}] VPC(slow) ok after ${Date.now() - t0}ms status=${resp.status}`,
+      );
+      return resp;
+    } catch (e) {
+      const dt = Date.now() - t0;
+      const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+      console.log(`[${ctx.containerId}] VPC(slow) error after ${dt}ms: ${msg}`);
+      return new Response(
+        JSON.stringify({
+          vpc_error: true,
+          error: msg,
+          elapsed_ms: dt,
+        }),
+        { status: 504, headers: { "content-type": "application/json" } },
+      );
+    }
   },
 };
 
@@ -46,12 +81,56 @@ export default {
     // Health check
     if (url.pathname === "/") {
       return new Response(
-        "container-vpc-demo: try /products or /products/sku-001 or /health\n",
+        "container-vpc-demo: try /products | /slow?delay=N | /vpc-slow?delay=N | /direct-vpc-slow?delay=N\n",
         { headers: { "content-type": "text/plain" } },
       );
+    }
+
+    // Direct VPC binding test (no container in the chain).
+    // Isolates the Worker -> SLOW_VPC -> tunnel -> origin path.
+    if (url.pathname.startsWith("/direct-vpc-slow")) {
+      const delay = url.searchParams.get("delay") ?? "5";
+      const nonce = url.searchParams.get("nonce") ?? Date.now().toString();
+      const t0 = Date.now();
+      try {
+        const resp = await env.SLOW_VPC.fetch(
+          `http://slow-service-via-vpc/slow?delay=${delay}&nonce=${nonce}`,
+        );
+        const body = await resp.text();
+        const dt = Date.now() - t0;
+        return new Response(
+          JSON.stringify({
+            route: "direct-vpc-binding",
+            elapsed_ms: dt,
+            upstream_status: resp.status,
+            upstream_x_served_by: resp.headers.get("x-served-by"),
+            upstream_body: tryJSON(body),
+          }, null, 2),
+          { headers: { "content-type": "application/json" } },
+        );
+      } catch (e) {
+        const dt = Date.now() - t0;
+        const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+        return new Response(
+          JSON.stringify({
+            route: "direct-vpc-binding",
+            error: msg,
+            elapsed_ms: dt,
+          }, null, 2),
+          { status: 504, headers: { "content-type": "application/json" } },
+        );
+      }
     }
 
     // Forward the inbound path/query to the container as-is.
     return getContainer(env.MY_CONTAINER).fetch(request);
   },
 } satisfies ExportedHandler<Env>;
+
+function tryJSON(s: string): unknown {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return s;
+  }
+}

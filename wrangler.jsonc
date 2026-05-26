@@ -29,7 +29,16 @@
       "binding": "PRIVATE_API",
       "service_id": "019dbc57-f657-7023-9b23-71c2646ecffa",
       "remote": true
+    },
+    {
+      "binding": "SLOW_VPC",
+      "service_id": "019e6576-429d-7802-84fa-0bb4269d6c5b",
+      "remote": true
     }
+  ],
+
+  "routes": [
+    { "pattern": "vpc-demo.demoflair.com", "custom_domain": true }
   ],
 
   "observability": { "enabled": true }
