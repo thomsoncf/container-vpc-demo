@@ -12,6 +12,11 @@ type Env = {
   PRIVATE_API: Fetcher; // Workers VPC Service binding → acme-products
   SLOW_VPC: Fetcher; // Workers VPC Service binding → slow-via-vpc (VM 127.0.0.1:9000)
   MAC_VPC: Fetcher; // Workers VPC Service binding → slow-via-mac (this Mac 127.0.0.1:9000)
+  // Optional Access service-token credentials. When set, Worker injects them
+  // on outbound fetches to slow.demoflair.com so an Access policy can
+  // restrict the public hostname to this Worker only.
+  ACCESS_CLIENT_ID?: string;
+  ACCESS_CLIENT_SECRET?: string;
 };
 
 export class MyContainer extends Container<Env> {
@@ -85,6 +90,55 @@ export default {
         "container-vpc-demo: try /products | /slow?delay=N | /vpc-slow?delay=N | /direct-vpc-slow?delay=N\n",
         { headers: { "content-type": "text/plain" } },
       );
+    }
+
+    // Public-HTTPS test (no VPC binding, no container).
+    // Worker -> fetch("https://slow.demoflair.com/...") -> Cloudflare edge
+    // -> cloudflared tunnel -> origin. Inbound at the edge is governed by
+    // the zone's proxy_read_timeout cache rule (set to 10 min currently).
+    // If ACCESS_CLIENT_ID/SECRET are configured as secrets, the headers
+    // are injected so the hostname can be protected by a Service-Auth
+    // Cloudflare Access policy. Otherwise the call is unauthenticated.
+    if (url.pathname.startsWith("/public-slow")) {
+      const delay = url.searchParams.get("delay") ?? "5";
+      const nonce = url.searchParams.get("nonce") ?? Date.now().toString();
+      const target = `https://slow.demoflair.com/slow?delay=${delay}&nonce=${nonce}`;
+      const headers: Record<string, string> = {};
+      if (env.ACCESS_CLIENT_ID && env.ACCESS_CLIENT_SECRET) {
+        headers["CF-Access-Client-Id"] = env.ACCESS_CLIENT_ID;
+        headers["CF-Access-Client-Secret"] = env.ACCESS_CLIENT_SECRET;
+      }
+      const t0 = Date.now();
+      try {
+        const resp = await fetch(target, { headers });
+        const body = await resp.text();
+        const dt = Date.now() - t0;
+        return new Response(
+          JSON.stringify({
+            route: "worker-public-https",
+            access_headers_injected:
+              !!env.ACCESS_CLIENT_ID && !!env.ACCESS_CLIENT_SECRET,
+            elapsed_ms: dt,
+            upstream_status: resp.status,
+            upstream_x_served_by: resp.headers.get("x-served-by"),
+            upstream_cf_ray: resp.headers.get("cf-ray"),
+            upstream_cf_cache_status: resp.headers.get("cf-cache-status"),
+            upstream_body: tryJSON(body),
+          }, null, 2),
+          { headers: { "content-type": "application/json" } },
+        );
+      } catch (e) {
+        const dt = Date.now() - t0;
+        const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+        return new Response(
+          JSON.stringify({
+            route: "worker-public-https",
+            error: msg,
+            elapsed_ms: dt,
+          }, null, 2),
+          { status: 504, headers: { "content-type": "application/json" } },
+        );
+      }
     }
 
     // Direct VPC binding test (no container in the chain).

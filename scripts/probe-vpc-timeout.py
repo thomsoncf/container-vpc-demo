@@ -33,7 +33,7 @@ from typing import Optional
 DEFAULT_HOST = "vpc-demo.demoflair.com"
 DEFAULT_DELAYS = [100, 200, 260, 265, 269, 271, 275, 280]
 DEFAULT_PATHS = ["direct", "container"]
-SOCKET_TIMEOUT = 420  # 7 min — well past any expected backend timeout
+SOCKET_TIMEOUT = 800  # 13+ min — well past any expected backend timeout
 
 # Probe path -> Worker URL path
 PROBE_PATHS = {
@@ -47,6 +47,13 @@ PROBE_PATHS = {
     # hits the Cloudflare edge for demoflair.com, governed by the
     # proxy_read_timeout cache rule)
     "public": "/slow",
+    # Worker -> fetch("https://slow.demoflair.com") with CF-Access service-
+    # token headers injected from Worker secrets. NO VPC binding, NO
+    # container. Pure Worker -> public Cloudflare edge -> tunnel -> origin.
+    # This is the Option 2 architecture; bounded by proxy_read_timeout
+    # (currently 10 min) at the edge, and whatever subrequest budget the
+    # Worker itself has.
+    "public-slow": "/public-slow",
     # Worker -> Container -> internal sleep (no upstream call).
     # Isolates the Worker -> Container fetch chain timeout.
     "sleep": "/sleep",
@@ -134,7 +141,7 @@ def run(probe: Probe, host: str, t_start: float) -> Result:
     upstream_error: Optional[str] = None
     try:
         j = json.loads(body)
-        if probe.path in ("direct", "direct-mac"):
+        if probe.path in ("direct", "direct-mac", "public-slow"):
             # Worker route returns flat JSON
             upstream_status = j.get("upstream_status")
             upstream_error = j.get("error")

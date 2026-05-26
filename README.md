@@ -100,3 +100,33 @@ curl https://container-vpc-demo.<your-subdomain>.workers.dev/products
 curl https://container-vpc-demo.<your-subdomain>.workers.dev/products/sku-001
 curl https://container-vpc-demo.<your-subdomain>.workers.dev/health
 ```
+
+## Measured timeouts
+
+Probe with `scripts/probe-vpc-timeout.py` (parallel, streams one line per probe).
+
+| Architecture | Worker route | Hard ceiling |
+|---|---|---|
+| Worker → VPC binding → tunnel → origin | `/direct-vpc-slow`, `/direct-mac-vpc-slow` | **~270 s** |
+| Worker → Container → VPC binding → tunnel → origin | `/vpc-slow` | **~270 s** (same wall) |
+| Worker → Container → internal sleep (no upstream) | `/sleep` | **~320 s** |
+| Worker → public HTTPS → Cloudflare edge → tunnel → origin (with `proxy_read_timeout` cache rule + Access service token) | `/public-slow` | **`proxy_read_timeout` value** (we verified 600 s with the rule set to 10 min) |
+
+The VPC binding's 270 s is independent of where the tunnel runs (verified by deploying a second tunnel on a Mac and re-probing — same exact 270.35 s wall, `Error: Network connection lost.`).
+
+## Security: Access service token on the public hostname
+
+`slow.demoflair.com` is protected by a Cloudflare Access self-hosted application with a Service-Auth policy referencing a service token. The Worker injects `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers from Worker secrets on every outbound fetch:
+
+```ts
+const resp = await fetch(target, {
+  headers: {
+    "CF-Access-Client-Id":     env.ACCESS_CLIENT_ID,
+    "CF-Access-Client-Secret": env.ACCESS_CLIENT_SECRET,
+  },
+});
+```
+
+- Direct unauthenticated curl to `slow.demoflair.com` → **HTTP 403**.
+- Worker `/public-slow` route → HTTP 200 (Access allows).
+- Credentials never leave the Worker runtime; container code never sees them.
